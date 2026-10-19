@@ -56,7 +56,7 @@ Known gaps are listed under [Current limitations](#current-limitations). More de
 ├── .github/
 │   ├── actions/terraform-env/    Shared action: AWS credentials, Terraform, backend init
 │   └── workflows/
-│       └── terraform.yml         CI checks, plus manual init, plan; apply locked in code
+│       └── terraform.yml         PR validation; init and plan on trusted pushes; apply locked
 ├── bootstrap/                    Remote-state S3 bucket (own local state, applied once)
 ├── docs/
 │   ├── architecture.md           Architecture in text form
@@ -157,11 +157,12 @@ One workflow, `.github/workflows/terraform.yml`, with four sequential jobs: `ini
 
 | Trigger | Jobs that run | What happens |
 |---|---|---|
-| Pull request, or push to `main` / `refactor/modules` | `validate` only | `terraform fmt -check -recursive`, then `init -backend=false` and `validate` in `envs/dev` and `bootstrap`. No AWS credentials, no backend, no plan. |
-| Manual run (`workflow_dispatch`) | `init`, `validate`, `plan` | `init` verifies the remote state is readable, `plan` reports creates, updates, destroys, replaces and moves, and fails safely on missing, empty or unexpected state. |
-| Manual run with `apply=true` | `apply` (locked) | **The apply job is locked in code and does not run.** When unlocked it would apply the exact fingerprinted plan from an encrypted artifact, from `main` only, after `production` environment approval. |
+| Pull request | `validate` only | `terraform fmt -check -recursive`, then `init -backend=false` and `validate` in `envs/dev` and `bootstrap`. No AWS credentials and no backend. Pull-request code is never planned or applied against AWS. |
+| Push to `main` or `refactor/modules` by the repository owner | `init`, `validate`, `plan` | `init` authenticates to AWS, initializes the S3 backend and verifies the remote state. After `validate` passes, `plan` reports creates, updates, destroys, replaces and moves, and fails on missing, empty or unreadable state, or on any destroy or replace. |
+| Manual run (`workflow_dispatch`) | same as a push | Same jobs, with optional inputs (`allow_destroy`, `allow_initial_create`, `expected_state_resources`, `apply`). |
+| Manual run with `apply=true` | `apply` (locked) | **The apply job is locked in code and does not run.** When unlocked it would apply the exact fingerprinted plan from the same run, from `main` only, after `production` environment approval. |
 
-A green run on a pull request or push only means `validate` passed. `init`, `plan` and `apply` show as skipped on those events, which is intentional. A manual run that a guard rejects (not `main` or `refactor/modules`, or not started by the repository owner) fails with an explanation instead of finishing green. Manual runs need the workflow file on the repository's default branch.
+A green pull-request run only means `validate` passed; `init`, `plan` and `apply` are skipped on purpose. A push or manual run that a guard rejects (not started by the repository owner) fails with an explanation instead of finishing green. Manual runs need the workflow file on the repository's default branch.
 
 Local checks performed on this code: `terraform fmt -check -recursive` and `terraform validate` in both roots, with `init -backend=false`. The workflow has not run on GitHub yet. Its open security blockers are documented in [docs/implementation-notes.md](docs/implementation-notes.md).
 

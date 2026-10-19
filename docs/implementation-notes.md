@@ -60,46 +60,48 @@ dependencies: `network` -> `security` -> `database`; `storage` and `database` ->
 - Coming later: ALB hourly and LCU charges, EC2 instances, CloudWatch, optional WAF.
 
 ## GitHub Actions
-- `.github/workflows/terraform.yml` is the only workflow (it replaced the separate CI and deploy
-  workflows). It has four sequential jobs: `init` -> `validate` -> `plan` -> `apply`.
-  - Pull requests and pushes to `main` / `refactor/modules` run `validate` only (`init`, `plan`
-    and `apply` are skipped), so no AWS credentials are used on those events. The push and pull
-    request runs of the same branch share a concurrency group, so the older one is cancelled.
-  - Manual runs (`workflow_dispatch`) run `init` -> `validate` -> `plan`. Backend values come
-    from the `TF_STATE_BUCKET` and `AWS_REGION` variables and the key `dev/terraform.tfstate`.
-- **Skipped jobs are normal on pull requests and pushes.** GitHub reports a run as successful
-  when jobs are skipped, so a green push run only means `validate` passed. The validate job
-  writes a summary saying so. On a manual run, a skipped `init` means a guard rejected the run
-  (not `main` / `refactor/modules`, or not started by the repository owner), and the run fails
-  with an explanation instead of finishing green. `plan` runs only after `init` and `validate`
-  succeeded.
-- To run init and plan: in the GitHub Actions tab choose the **Terraform** workflow, click
-  **Run workflow**, pick branch `main` or `refactor/modules`, leave `apply` unchecked, and
-  set `allow_initial_create` only if the remote state is expected to be empty. The Run workflow
-  button needs the workflow file on the repository's default branch.
-- The plan is never printed. The job summary lists creates, updates, destroys, replaces and
-  moves by address. A destroy or replace fails the run unless `allow_destroy` is set. The plan
-  is fingerprinted (SHA-256, shown in the summary and re-checked by apply). Only when
-  `apply=true` it is also encrypted with a key derived from the existing
-  `AWS_SECRET_ACCESS_KEY` plus the run id and attempt (no extra secret) and stored as a 1-day
-  artifact named per run attempt. It is never uploaded in plaintext.
+- `.github/workflows/terraform.yml` is the only workflow. It has four sequential jobs:
+  `init` -> `validate` -> `plan` -> `apply`.
+  - **Pull requests** run `validate` only. `init`, `plan` and `apply` are skipped, so no AWS
+    credentials are used and no pull-request code is planned or applied against AWS.
+  - **Pushes to `main` / `refactor/modules`** made by the repository owner run `init`, then
+    `validate`, then `plan` automatically. Manual runs (`workflow_dispatch`) do the same and
+    add optional inputs. Backend values come from the `TF_STATE_BUCKET` and `AWS_REGION`
+    variables and the key `dev/terraform.tfstate`.
+  - A push by anyone else, or any run that a guard rejects, makes `init` and `plan` skip and
+    the run **fail with an explanation** instead of finishing green.
+- `init` fails clearly if the required settings are missing or malformed (names only, never
+  values), if AWS authentication fails (the check discards the account details), if backend
+  initialization fails, or if the remote state cannot be read. `validate` always runs after
+  `init` finishes, whatever its result, and never needs AWS. `plan` runs only after `init` and
+  `validate` both succeeded.
+- `plan` fails on a missing or empty remote state (pushes can never allow this; a manual run
+  can set `allow_initial_create`), on a mismatch with `expected_state_resources`, and on any
+  destroy or replace unless a manual run sets `allow_destroy`. The plan is never printed. The
+  job summary lists creates, updates, destroys, replaces and moves by address, plus a SHA-256
+  fingerprint of the plan.
+- A plan is stored only for an apply request (`apply=true`), never in plaintext: it is
+  encrypted with a key derived from the existing `AWS_SECRET_ACCESS_KEY` plus the run id and
+  attempt (no extra secret), uploaded for 1 day, and re-checked against the fingerprint by
+  `apply`.
 - **Apply is locked in code** (`false &&` in the apply job's `if`). Unlocked, it would also
-  require a manual run, `apply=true`, branch `main`, a matching `expected_state_resources`, and
-  approval for the existing `production` environment. Unlock only in a reviewed change after
-  the blockers below are resolved. The earlier optional `TF_APPLY_ENABLED` variable was dropped
-  in favor of this stricter code lock.
-- Init and plan only run for the repository owner on `main` or `refactor/modules`. Missing or
-  malformed settings fail the `init` job before any AWS call (names only, never values), an
-  unreadable remote state fails closed instead of reporting 0 resources, and a missing or empty
-  state fails the plan unless `allow_initial_create` is set.
+  require a successful `plan` in the same run, a manual run with `apply=true`, branch `main`,
+  and approval for the existing `production` environment, and it would run
+  `terraform apply -input=false -lock-timeout=60s -no-color -auto-approve tfplan`.
+  `-auto-approve` only removes Terraform's prompt; the GitHub environment approval is the real
+  gate. Apply never runs on pull requests or on a plain push.
+- **Concurrency:** pushes and manual runs share one group that is never cancelled (a run may
+  hold the state lock), so they queue. Pull-request runs are grouped per branch and a newer
+  run cancels the older one.
 - Required existing GitHub setup: secrets `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`;
   variables `TF_STATE_BUCKET`, `AWS_REGION`. No other secret or variable is used.
-- Open security blockers for enabling apply: the same AWS keys are used by plan and apply (no
-  read-only identity, no environment-scoped keys); `main` branch protection and the
-  `production` environment (reviewers, prevent self-review) are unverified; the Linux
-  provider lock hashes are unverified; the reviewer-check API call is untested.
-- Not yet run on GitHub; the workflows were checked locally only (shell syntax, structure).
-
+- **Why apply must stay locked:** init and plan now use the same AWS keys that apply would use,
+  automatically on pushes, and they run the branch's Terraform code. There is no read-only
+  identity and no environment-scoped secret (both need new secrets). `main` branch protection
+  and the `production` environment (required reviewers, prevent self-review) cannot be verified
+  locally. The reviewer-check API call and the Linux provider lock hashes are untested.
+- Not yet run on GitHub; the workflow was checked locally only (YAML parse, shell syntax,
+  condition evaluation, fake-command tests).
 ## Operating notes
 - Before `envs/dev` can use the remote backend, `bootstrap/` must be applied and
   `backend.hcl` created from `backend.hcl.example`.

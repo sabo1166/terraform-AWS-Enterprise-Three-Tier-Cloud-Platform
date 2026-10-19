@@ -2,10 +2,12 @@ name: Terraform
 
 # One workflow, four sequential jobs: init -> validate -> plan -> apply.
 #
-#   pull_request / push : only `validate` runs (format check + offline validate).
-#                         No AWS credentials are used and nothing is planned or applied.
-#   workflow_dispatch   : init -> validate -> plan against the remote S3 backend, then
-#                         apply of the exact reviewed plan file.
+#   pull_request           : only `validate` runs (format check + offline validate).
+#                            No AWS credentials are used and no pull-request code is
+#                            ever planned or applied against AWS.
+#   push to main /         : init -> validate -> plan against the remote S3 backend, but
+#   refactor/modules         only when the push was made by the repository owner.
+#   workflow_dispatch      : the same, plus an optional apply request.
 #
 # APPLY IS LOCKED IN CODE (see the `if:` of the apply job). It must stay locked until
 # the security blockers in docs/implementation-notes.md are resolved.
@@ -37,12 +39,14 @@ on:
 permissions:
   contents: read
 
-# Manual runs share one group and are never cancelled (they may hold the state
-# lock). CI runs are grouped per branch name, so the push run and the pull
-# request run for the same branch do not both finish: the older one is cancelled.
+# Runs that use AWS (push and manual) share one group and are never cancelled,
+# because they may hold the state lock; a newer run waits for the current one.
+# Pull-request runs only validate, so they are grouped per branch and a newer run
+# cancels the older one. A push and a pull request for the same branch therefore
+# never touch the remote state at the same time (only the push run does).
 concurrency:
-  group: ${{ github.event_name == 'workflow_dispatch' && 'terraform-deploy-dev' || format('terraform-ci-{0}', github.head_ref || github.ref_name) }}
-  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
+  group: ${{ github.event_name == 'pull_request' && format('terraform-pr-{0}', github.head_ref) || 'terraform-aws-dev' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   # Same version used for local validation; the project itself requires >= 1.10.0
@@ -54,15 +58,16 @@ env:
 
 jobs:
   # ---------------------------------------------------------------------------
-  # 1. init: manual runs only. Check configuration, configure AWS credentials,
-  #    initialize the S3 backend and prove the remote state is readable.
+  # 1. init: trusted pushes and manual runs. Check configuration, configure AWS
+  #    credentials, initialize the S3 backend and prove the remote state is readable.
   # ---------------------------------------------------------------------------
   init:
-    name: 1. Init (manual runs only)
-    # Secrets are only used for manual runs on trusted branches started by the
-    # repository owner. Pull requests and pushes never reach AWS.
+    name: 1. Init (trusted pushes and manual runs)
+    # AWS credentials are only used for a push or manual run on main or
+    # refactor/modules that was started by the repository owner. Pull requests
+    # never reach this job, so no pull-request code runs with AWS credentials.
     if: >-
-      github.event_name == 'workflow_dispatch' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
       (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/refactor/modules') &&
       github.triggering_actor == github.repository_owner
     runs-on: ubuntu-latest
@@ -156,13 +161,14 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # 2. validate: runs on every event (pull request, push, manual). Formatting and
-  #    offline validation; needs no AWS access. On CI events the init job is
-  #    skipped, which is accepted; on manual runs init must have succeeded.
+  #    offline validation; needs no AWS access. It runs after init finishes, but
+  #    whatever init's result is (skipped on pull requests, failed on an AWS
+  #    problem), so the validation result is always reported.
   # ---------------------------------------------------------------------------
   validate:
     name: 2. Validate
     needs: [init]
-    if: ${{ !cancelled() && (needs.init.result == 'success' || needs.init.result == 'skipped') }}
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -195,10 +201,11 @@ jobs:
           terraform validate
 
       # Explains skipped jobs, because GitHub shows a skipped job as grey and the
-      # run as green. On pull requests and pushes the skips are intentional. On a
-      # manual run, a skipped init means a guard rejected the run (wrong branch or
-      # not started by the repository owner): fail loudly instead of finishing
-      # green with nothing planned.
+      # run as green. On pull requests the skips are intentional. On a push or
+      # manual run, a skipped init means a guard rejected the run (not started by
+      # the repository owner, or an unexpected branch): fail loudly instead of
+      # finishing green with nothing planned. If init ran but failed, the run is
+      # already red because of init itself.
       - name: Explain skipped jobs
         if: ${{ !cancelled() }}
         env:
@@ -208,19 +215,18 @@ jobs:
           ACTOR: ${{ github.triggering_actor }}
           OWNER: ${{ github.repository_owner }}
         run: |
-          if [ "$EVENT" != "workflow_dispatch" ]; then
+          if [ "$EVENT" = "pull_request" ]; then
             {
-              echo "### Terraform CI: formatting and validation only"
+              echo "### Pull request: formatting and validation only"
               echo ""
-              echo "Event: \`$EVENT\`. On pull requests and pushes only the **validate** job runs."
-              echo "The **init**, **plan** and **apply** jobs are skipped by design: they use AWS credentials and run only on manual runs."
+              echo "On pull requests only the **validate** job runs. The **init**, **plan** and **apply** jobs are skipped by design: they use AWS credentials and never run for pull-request code."
               echo "A green run here means formatting and offline validation passed. Nothing was planned or applied."
             } >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-          if [ "$INIT_RESULT" = "success" ]; then
+          if [ "$INIT_RESULT" = "success" ] || [ "$INIT_RESULT" = "failure" ]; then
             {
-              echo "### Manual run"
+              echo "### Trusted run (\`$EVENT\`)"
               echo ""
               echo "The **apply** job is skipped by design: it is locked in code until the security blockers in docs/implementation-notes.md are resolved."
             } >> "$GITHUB_STEP_SUMMARY"
@@ -228,11 +234,11 @@ jobs:
           fi
           problem=0
           if [ "$REF" != "refs/heads/main" ] && [ "$REF" != "refs/heads/refactor/modules" ]; then
-            echo "::error::Manual runs are only allowed from main or refactor/modules (this run used $REF), so init and plan were skipped."
+            echo "::error::init and plan only run on main or refactor/modules (this run used $REF), so they were skipped."
             problem=1
           fi
           if [ "$ACTOR" != "$OWNER" ]; then
-            echo "::error::Manual runs must be started by the repository owner ($OWNER); this run was started by $ACTOR, so init and plan were skipped."
+            echo "::error::init and plan only run for the repository owner ($OWNER); this run was started by $ACTOR, so they were skipped."
             problem=1
           fi
           if [ "$problem" -eq 0 ]; then
@@ -241,18 +247,19 @@ jobs:
           exit 1
 
   # ---------------------------------------------------------------------------
-  # 3. plan: manual runs only (skipped automatically when init is skipped).
-  #    Plans against the remote state, keeps the plan out of logs and the
-  #    repository, reports creates/updates/deletes/replaces, and hands the plan
-  #    to apply as an encrypted, fingerprinted, short-lived artifact.
+  # 3. plan: runs automatically after a successful init and validate on trusted
+  #    pushes and manual runs, never on pull requests. Plans against the remote
+  #    state, keeps the plan out of logs and the repository, reports creates,
+  #    updates, deletes, replaces and moves, and (only for an apply request) hands
+  #    the plan to apply as an encrypted, fingerprinted, short-lived artifact.
   # ---------------------------------------------------------------------------
   plan:
-    name: 3. Plan (manual runs only)
+    name: 3. Plan (trusted pushes and manual runs)
     needs: [init, validate]
-    # Explicit: plan runs only on a manual run, and only when init (which proved
-    # the S3 backend and remote state are readable) and validate both succeeded.
+    # Explicit: init (which proved the S3 backend and remote state are readable)
+    # and validate must both have succeeded, and the event must not be a pull request.
     if: >-
-      github.event_name == 'workflow_dispatch' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
       needs.init.result == 'success' &&
       needs.validate.result == 'success'
     runs-on: ubuntu-latest
@@ -285,7 +292,7 @@ jobs:
             exit 1
           fi
           if [ "$ACTUAL" -eq 0 ] && [ "$ALLOW_INITIAL" != "true" ]; then
-            echo "::error::Remote state is missing or empty, so the plan would create everything. Set allow_initial_create only if that is intended."
+            echo "::error::Remote state is missing or empty, so the plan would create everything. Push runs never allow this; a manual run can set allow_initial_create if that is intended."
             exit 1
           fi
           echo "Remote state has $ACTUAL resources."
@@ -346,7 +353,7 @@ jobs:
           total=$((deletes + replaces))
           if [ "$total" -gt 0 ] && [ "$ALLOW_DESTROY" != "true" ]; then
             rm -f tfplan
-            echo "::error::Plan has $deletes destroy and $replaces replace action(s). Review the job summary; re-run with allow_destroy only if intended."
+            echo "::error::Plan has $deletes destroy and $replaces replace action(s). Review the job summary; only a manual run with allow_destroy can continue past this."
             exit 1
           fi
 
@@ -399,10 +406,14 @@ jobs:
     # only in a reviewed change, after the blockers in docs/implementation-notes.md
     # are resolved (separate read-only plan credentials, protected `main` and a
     # `production` environment with required reviewers, verified on GitHub).
-    # The remaining conditions still apply once unlocked: manual run, explicit
-    # apply=true, and the main branch.
+    # `-auto-approve` only removes Terraform's own prompt; the GitHub environment
+    # approval is the real gate.
+    # The remaining conditions still apply once unlocked: the plan job of this same
+    # run succeeded, a manual run with an explicit apply=true, and the main branch.
+    # Apply never runs on pull requests or on a plain push.
     if: >-
       false &&
+      needs.plan.result == 'success' &&
       github.event_name == 'workflow_dispatch' &&
       inputs.apply == true &&
       github.ref == 'refs/heads/main'
