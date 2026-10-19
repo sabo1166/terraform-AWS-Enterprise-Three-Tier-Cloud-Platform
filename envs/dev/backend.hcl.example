@@ -1,0 +1,6 @@
+# Copy to backend.hcl (git-ignored) and fill in after running bootstrap/.
+bucket       = "<state_bucket_name from bootstrap output>"
+key          = "dev/terraform.tfstate"
+region       = "us-east-1"
+encrypt      = true
+use_lockfile = true # S3 native locking, no DynamoDB table needed

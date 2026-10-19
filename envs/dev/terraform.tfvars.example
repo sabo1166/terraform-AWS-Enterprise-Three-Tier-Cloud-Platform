@@ -1,0 +1,12 @@
+# Copy to terraform.tfvars (git-ignored) and adjust. No secrets belong here.
+region            = "us-east-1"
+environment       = "dev"
+vpc_cidr          = "10.0.0.0/16"
+nat_mode          = "single" # or "per_az" for one NAT per AZ
+alb_ingress_cidrs = ["0.0.0.0/0"] # tighten to ["<your-ip>/32"] while testing
+
+# Database
+db_instance_class        = "db.t4g.micro"
+db_multi_az              = false # true roughly doubles instance cost
+db_backup_retention_days = 7
+db_deletion_protection   = true # set false (and apply) before any destroy
