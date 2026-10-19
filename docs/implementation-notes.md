@@ -66,8 +66,11 @@ dependencies: `network` -> `security` -> `database`; `storage` and `database` ->
     credentials are used and no pull-request code is planned or applied against AWS.
   - **Pushes to `main` / `refactor/modules`** made by the repository owner run `init`, then
     `validate`, then `plan` automatically. Manual runs (`workflow_dispatch`) do the same and
-    add optional inputs. Backend values come from the `TF_STATE_BUCKET` and `AWS_REGION`
-    variables and the key `dev/terraform.tfstate`.
+    add optional inputs. The bucket comes from the `TF_STATE_BUCKET` variable; the key
+    `dev/terraform.tfstate` and the default region come from the tracked
+    `envs/dev/backend.hcl.example`, and the workflow refuses to run if its key disagrees with it.
+    The region comes from the optional `AWS_REGION` variable and falls back to that file's
+    region (`us-east-1`, which matches the `region` defaults in `envs/dev` and `bootstrap/`).
   - A push by anyone else, or any run that a guard rejects, makes `init` and `plan` skip and
     the run **fail with an explanation** instead of finishing green.
 - `init` fails clearly if the required settings are missing or malformed (names only, never
@@ -93,8 +96,19 @@ dependencies: `network` -> `security` -> `database`; `storage` and `database` ->
 - **Concurrency:** pushes and manual runs share one group that is never cancelled (a run may
   hold the state lock), so they queue. Pull-request runs are grouped per branch and a newer
   run cancels the older one.
-- Required existing GitHub setup: secrets `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`;
-  variables `TF_STATE_BUCKET`, `AWS_REGION`. No other secret or variable is used.
+- GitHub setup: repository **secrets** `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and the
+  repository **variable** `TF_STATE_BUCKET` (the bootstrap bucket, output `state_bucket_name`)
+  are required; `init` fails early with a message naming whichever is missing. The repository
+  **variable** `AWS_REGION` is optional (default above); set it if the state bucket is in a
+  different region. Values must be repository-level, on the Secrets or Variables tab that
+  matches their kind. No other secret or variable is used. The bucket name contains the AWS
+  account ID, so it cannot be derived from tracked files and is never guessed.
+- **Runner and actions:** jobs run on `ubuntu-24.04` (pinned instead of `ubuntu-latest`, which
+  is migrating to Ubuntu 26). Actions are on Node 24 releases: `actions/checkout@v5`,
+  `actions/upload-artifact@v6`, `actions/download-artifact@v7`,
+  `aws-actions/configure-aws-credentials@v6`, `hashicorp/setup-terraform@v4`. They need a
+  runner of at least 2.327.1, which GitHub-hosted runners provide. These versions were taken
+  from public release information and have not been run on GitHub.
 - **Why apply must stay locked:** init and plan now use the same AWS keys that apply would use,
   automatically on pushes, and they run the branch's Terraform code. There is no read-only
   identity and no environment-scoped secret (both need new secrets). `main` branch protection

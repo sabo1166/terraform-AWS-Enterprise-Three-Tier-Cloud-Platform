@@ -70,41 +70,46 @@ jobs:
       (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
       (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/refactor/modules') &&
       github.triggering_actor == github.repository_owner
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     outputs:
       state_count: ${{ steps.state.outputs.count }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           persist-credentials: false
 
-      # Reports only whether each value is set; no value is printed.
+      # Reports only whether each value is set; no value is printed. The AWS
+      # region is NOT required here: when the AWS_REGION variable is unset the
+      # shared action uses the project's own default region (see action.yml).
+      # The bucket name cannot be derived from tracked files (it contains the AWS
+      # account ID), so it must be configured.
       - name: Check required secrets and variables
         env:
           HAS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID != '' }}
           HAS_SECRET: ${{ secrets.AWS_SECRET_ACCESS_KEY != '' }}
           HAS_BUCKET: ${{ vars.TF_STATE_BUCKET != '' }}
-          HAS_REGION: ${{ vars.AWS_REGION != '' }}
         run: |
           missing=0
-          for n in HAS_KEY_ID HAS_SECRET HAS_BUCKET HAS_REGION; do
+          for n in HAS_KEY_ID HAS_SECRET HAS_BUCKET; do
             if [ "${!n}" != "true" ]; then
+              hint=""
               case "$n" in
                 HAS_KEY_ID)  kind="secret";   name="AWS_ACCESS_KEY_ID";      tab="Secrets" ;;
                 HAS_SECRET)  kind="secret";   name="AWS_SECRET_ACCESS_KEY";  tab="Secrets" ;;
-                HAS_BUCKET)  kind="variable"; name="TF_STATE_BUCKET";        tab="Variables" ;;
-                HAS_REGION)  kind="variable"; name="AWS_REGION";             tab="Variables" ;;
+                HAS_BUCKET)  kind="variable"; name="TF_STATE_BUCKET";        tab="Variables"
+                  hint=" Use the state bucket created by bootstrap/ (output state_bucket_name). With the bootstrap defaults it is named three-tier-tfstate-<aws-account-id>-<region>." ;;
               esac
-              echo "::error::Missing repository $kind $name. Add it under Settings > Secrets and variables > Actions > $tab tab. Environment-level values, and a secret where a variable is expected (or the reverse), are not read."
+              echo "::error::Missing repository $kind $name. Add it under Settings > Secrets and variables > Actions > $tab tab. Environment-level values, and a secret where a variable is expected (or the reverse), are not read.$hint"
               missing=1
             fi
           done
           exit "$missing"
 
       # Rejects malformed values before any AWS call. Values are never echoed
-      # on failure, only the name of the offending setting.
+      # on failure, only the name of the offending setting. The region is only
+      # checked when the optional AWS_REGION variable is set.
       - name: Validate configuration values
         env:
           CFG_REGION: ${{ vars.AWS_REGION }}
@@ -112,7 +117,7 @@ jobs:
           REQ_APPLY: ${{ inputs.apply }}
         run: |
           bad=0
-          if ! [[ "$CFG_REGION" =~ ^[a-z]{2}(-[a-z]+)+-[0-9]+$ ]]; then
+          if [ -n "$CFG_REGION" ] && ! [[ "$CFG_REGION" =~ ^[a-z]{2}(-[a-z]+)+-[0-9]+$ ]]; then
             echo "::error::AWS_REGION is not a valid AWS region name (for example us-east-1)."
             bad=1
           fi
@@ -175,16 +180,16 @@ jobs:
     name: 2. Validate
     needs: [init]
     if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           persist-credentials: false
 
       - name: Set up Terraform
-        uses: hashicorp/setup-terraform@v3
+        uses: hashicorp/setup-terraform@v4
         with:
           terraform_version: ${{ env.TF_VERSION }}
           terraform_wrapper: false
@@ -268,11 +273,11 @@ jobs:
       (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
       needs.init.result == 'success' &&
       needs.validate.result == 'success'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
-    env:
-      # The region of the plan must equal the state bucket region.
-      TF_VAR_region: ${{ vars.AWS_REGION }}
+    # TF_VAR_region (the region of the plan, which must equal the state bucket
+    # region) is exported by the shared action from the same resolved region it
+    # gives the backend, so it can never disagree with it.
     outputs:
       plan_sha256: ${{ steps.fingerprint.outputs.sha256 }}
     steps:
@@ -304,7 +309,7 @@ jobs:
           echo "Remote state has $ACTUAL resources."
 
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           persist-credentials: false
 
@@ -390,7 +395,7 @@ jobs:
 
       - name: Upload encrypted plan (1 day retention)
         if: inputs.apply == true
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: tfplan-dev-${{ github.run_id }}-${{ github.run_attempt }}
           path: envs/dev/tfplan.enc
@@ -427,7 +432,7 @@ jobs:
     # reviewers cannot be verified locally; the first step below checks it at run
     # time and stops if it does not.
     environment: production
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     permissions:
       contents: read
@@ -451,7 +456,7 @@ jobs:
           echo "production environment has required reviewers configured."
 
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           persist-credentials: false
 
@@ -466,7 +471,7 @@ jobs:
           terraform-version: ${{ env.TF_VERSION }}
 
       - name: Download encrypted plan
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: tfplan-dev-${{ github.run_id }}-${{ github.run_attempt }}
           path: envs/dev
