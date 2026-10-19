@@ -1,0 +1,441 @@
+name: Terraform
+
+# One workflow, four sequential jobs: init -> validate -> plan -> apply.
+#
+#   pull_request / push : only `validate` runs (format check + offline validate).
+#                         No AWS credentials are used and nothing is planned or applied.
+#   workflow_dispatch   : init -> validate -> plan against the remote S3 backend, then
+#                         apply of the exact reviewed plan file.
+#
+# APPLY IS LOCKED IN CODE (see the `if:` of the apply job). It must stay locked until
+# the security blockers in docs/implementation-notes.md are resolved.
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - refactor/modules
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: "Apply the reviewed plan after approval. Must be explicitly set to true."
+        type: boolean
+        default: false
+      allow_destroy:
+        description: "Allow a plan that destroys or replaces resources to continue."
+        type: boolean
+        default: false
+      expected_state_resources:
+        description: "Number of resources you expect in remote state (shown by the init job). Required for apply."
+        type: string
+        default: ""
+      allow_initial_create:
+        description: "Allow planning when remote state is empty or missing (the plan would create everything)."
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# Manual runs share one group and are never cancelled (they may hold the state
+# lock). CI runs are grouped per branch name, so the push run and the pull
+# request run for the same branch do not both finish: the older one is cancelled.
+concurrency:
+  group: ${{ github.event_name == 'workflow_dispatch' && 'terraform-deploy-dev' || format('terraform-ci-{0}', github.head_ref || github.ref_name) }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
+
+env:
+  # Same version used for local validation; the project itself requires >= 1.10.0
+  # (envs/dev/versions.tf).
+  TF_VERSION: "1.16.2"
+  TF_IN_AUTOMATION: "true"
+  # The one state key defined by the project (envs/dev/backend.hcl.example).
+  TF_STATE_KEY: dev/terraform.tfstate
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1. init: manual runs only. Check configuration, configure AWS credentials,
+  #    initialize the S3 backend and prove the remote state is readable.
+  # ---------------------------------------------------------------------------
+  init:
+    name: 1. Init
+    # Secrets are only used for manual runs on trusted branches started by the
+    # repository owner. Pull requests and pushes never reach AWS.
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/refactor/modules') &&
+      github.triggering_actor == github.repository_owner
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      state_count: ${{ steps.state.outputs.count }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # Reports only whether each value is set; no value is printed.
+      - name: Check required secrets and variables
+        env:
+          HAS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID != '' }}
+          HAS_SECRET: ${{ secrets.AWS_SECRET_ACCESS_KEY != '' }}
+          HAS_BUCKET: ${{ vars.TF_STATE_BUCKET != '' }}
+          HAS_REGION: ${{ vars.AWS_REGION != '' }}
+        run: |
+          missing=0
+          for n in HAS_KEY_ID HAS_SECRET HAS_BUCKET HAS_REGION; do
+            if [ "${!n}" != "true" ]; then
+              echo "::error::Missing GitHub configuration: ${n#HAS_}"
+              missing=1
+            fi
+          done
+          exit "$missing"
+
+      # Rejects malformed values before any AWS call. Values are never echoed
+      # on failure, only the name of the offending setting.
+      - name: Validate configuration values
+        env:
+          CFG_REGION: ${{ vars.AWS_REGION }}
+          CFG_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+          REQ_APPLY: ${{ inputs.apply }}
+        run: |
+          bad=0
+          if ! [[ "$CFG_REGION" =~ ^[a-z]{2}(-[a-z]+)+-[0-9]+$ ]]; then
+            echo "::error::AWS_REGION is not a valid AWS region name (for example us-east-1)."
+            bad=1
+          fi
+          if ! [[ "$CFG_BUCKET" =~ ^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$ ]]; then
+            echo "::error::TF_STATE_BUCKET is not a valid S3 bucket name."
+            bad=1
+          fi
+          if [ "$REQ_APPLY" = "true" ]; then
+            echo "::warning::apply=true was requested, but the apply job is locked in code and will be skipped."
+            if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+              echo "::warning::apply only runs from main."
+            fi
+          fi
+          exit "$bad"
+
+      - name: Set up Terraform and initialize backend
+        uses: ./.github/actions/terraform-env
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.AWS_REGION }}
+          state-bucket: ${{ vars.TF_STATE_BUCKET }}
+          state-key: ${{ env.TF_STATE_KEY }}
+          terraform-version: ${{ env.TF_VERSION }}
+
+      # Only a count: state contents are never printed. Fails closed: a
+      # permission or backend error is NOT reported as "0 resources". A missing
+      # state object is reported as 0 and judged by the plan job.
+      - name: Verify remote state is accessible
+        id: state
+        working-directory: envs/dev
+        run: |
+          set +e
+          list=$(terraform state list 2>"$RUNNER_TEMP/state.err")
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            if grep -q "No state file was found" "$RUNNER_TEMP/state.err"; then
+              count=0
+            else
+              rm -f "$RUNNER_TEMP/state.err"
+              echo "::error::Could not read the remote state (permission or backend error). Stopping."
+              exit 1
+            fi
+          else
+            count=$(printf '%s\n' "$list" | grep -c . || true)
+          fi
+          rm -f "$RUNNER_TEMP/state.err"
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+          echo "Resources currently in remote state: $count"
+          echo "Resources currently in remote state: $count" >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
+  # 2. validate: runs on every event (pull request, push, manual). Formatting and
+  #    offline validation; needs no AWS access. On CI events the init job is
+  #    skipped, which is accepted; on manual runs init must have succeeded.
+  # ---------------------------------------------------------------------------
+  validate:
+    name: 2. Validate
+    needs: [init]
+    if: ${{ !cancelled() && (needs.init.result == 'success' || needs.init.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Format check
+        run: terraform fmt -check -recursive
+
+      # -backend=false: no S3 backend, no state, no AWS access. Providers and
+      # modules come from the public registry and the repository only.
+      - name: Init and validate envs/dev (no backend)
+        working-directory: envs/dev
+        run: |
+          terraform init -backend=false -input=false
+          terraform validate
+
+      - name: Init and validate bootstrap (no backend)
+        working-directory: bootstrap
+        run: |
+          terraform init -backend=false -input=false
+          terraform validate
+
+  # ---------------------------------------------------------------------------
+  # 3. plan: manual runs only (skipped automatically when init is skipped).
+  #    Plans against the remote state, keeps the plan out of logs and the
+  #    repository, reports creates/updates/deletes/replaces, and hands the plan
+  #    to apply as an encrypted, fingerprinted, short-lived artifact.
+  # ---------------------------------------------------------------------------
+  plan:
+    name: 3. Plan
+    needs: [init, validate]
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # The region of the plan must equal the state bucket region.
+      TF_VAR_region: ${{ vars.AWS_REGION }}
+    outputs:
+      plan_sha256: ${{ steps.fingerprint.outputs.sha256 }}
+    steps:
+      # Fails safely, before any plan is made, when the remote state is missing,
+      # empty or does not match what the operator expects.
+      - name: Check state size
+        env:
+          ACTUAL: ${{ needs.init.outputs.state_count }}
+          EXPECTED: ${{ inputs.expected_state_resources }}
+          ALLOW_INITIAL: ${{ inputs.allow_initial_create }}
+          REQ_APPLY: ${{ inputs.apply }}
+        run: |
+          if [ -n "$EXPECTED" ] && ! [[ "$EXPECTED" =~ ^[0-9]+$ ]]; then
+            echo "::error::expected_state_resources must be a whole number."
+            exit 1
+          fi
+          if [ "$REQ_APPLY" = "true" ] && [ -z "$EXPECTED" ]; then
+            echo "::error::apply requires expected_state_resources (see the init job summary)."
+            exit 1
+          fi
+          if [ -n "$EXPECTED" ] && [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "::error::Remote state has $ACTUAL resources but expected_state_resources is $EXPECTED. Check TF_STATE_BUCKET and the state key."
+            exit 1
+          fi
+          if [ "$ACTUAL" -eq 0 ] && [ "$ALLOW_INITIAL" != "true" ]; then
+            echo "::error::Remote state is missing or empty, so the plan would create everything. Set allow_initial_create only if that is intended."
+            exit 1
+          fi
+          echo "Remote state has $ACTUAL resources."
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Terraform and initialize backend
+        uses: ./.github/actions/terraform-env
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.AWS_REGION }}
+          state-bucket: ${{ vars.TF_STATE_BUCKET }}
+          state-key: ${{ env.TF_STATE_KEY }}
+          terraform-version: ${{ env.TF_VERSION }}
+
+      # Plan output goes to a file, not the log: it can contain resource
+      # attributes. On failure only the error lines are shown.
+      - name: Terraform plan (saved to a file)
+        working-directory: envs/dev
+        run: |
+          if ! terraform plan -input=false -lock-timeout=60s -no-color -out=tfplan > plan.log 2>&1; then
+            echo "::error::terraform plan failed. Error lines:"
+            grep -A8 'Error' plan.log || true
+            rm -f plan.log tfplan
+            exit 1
+          fi
+          rm -f plan.log
+
+      # Prints only counts and "action address" lines, never attribute values.
+      - name: Report changes and block destroys
+        working-directory: envs/dev
+        env:
+          ALLOW_DESTROY: ${{ inputs.allow_destroy }}
+        run: |
+          terraform show -json tfplan > plan.json
+          count() { jq "[.resource_changes[]? | select($1)] | length" plan.json; }
+          creates=$(count '.change.actions==["create"]')
+          updates=$(count '.change.actions==["update"]')
+          deletes=$(count '.change.actions==["delete"]')
+          replaces=$(count '.change.actions|contains(["delete","create"])')
+          moves=$(count '.previous_address != null')
+          {
+            echo "### Terraform plan (dev)"
+            echo ""
+            echo "create: $creates | update: $updates | destroy: $deletes | replace: $replaces | moved: $moves"
+            echo ""
+            echo '```'
+            jq -r '.resource_changes[]? | select(.change.actions != ["no-op"] and .change.actions != ["read"]) | "\(.change.actions | join("+"))  \(.address)"' plan.json
+            jq -r '.resource_changes[]? | select(.previous_address != null) | "move  \(.previous_address) -> \(.address)"' plan.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "create=$creates update=$updates destroy=$deletes replace=$replaces moved=$moves"
+          rm -f plan.json
+          total=$((deletes + replaces))
+          if [ "$total" -gt 0 ] && [ "$ALLOW_DESTROY" != "true" ]; then
+            rm -f tfplan
+            echo "::error::Plan has $deletes destroy and $replaces replace action(s). Review the job summary; re-run with allow_destroy only if intended."
+            exit 1
+          fi
+
+      # Fingerprint of the exact plan file. Shown in the summary and re-checked by
+      # the apply job after decryption, so a different file cannot be applied.
+      - name: Fingerprint plan
+        id: fingerprint
+        working-directory: envs/dev
+        run: |
+          sha=$(sha256sum tfplan | cut -d' ' -f1)
+          echo "sha256=$sha" >> "$GITHUB_OUTPUT"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Plan SHA-256: \`$sha\`" >> "$GITHUB_STEP_SUMMARY"
+
+      # The plan is only stored when an apply was requested, and never in
+      # plaintext. GitHub artifacts cannot have their own access list, so it is
+      # encrypted first. No extra secret is used: the key material is derived
+      # from the existing AWS secret plus this run's id and attempt. Anyone who
+      # could decrypt it already holds the AWS key. The fingerprint provides
+      # integrity.
+      - name: Encrypt plan
+        if: inputs.apply == true
+        working-directory: envs/dev
+        env:
+          PLAN_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}:${{ github.run_id }}:${{ github.run_attempt }}
+        run: |
+          openssl enc -aes-256-cbc -pbkdf2 -iter 600000 -salt -in tfplan -out tfplan.enc -pass env:PLAN_KEY
+
+      - name: Upload encrypted plan (1 day retention)
+        if: inputs.apply == true
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan-dev-${{ github.run_id }}-${{ github.run_attempt }}
+          path: envs/dev/tfplan.enc
+          retention-days: 1
+          if-no-files-found: error
+
+      - name: Remove plan files from runner
+        if: always()
+        working-directory: envs/dev
+        run: rm -f tfplan tfplan.enc plan.json plan.log
+
+  # ---------------------------------------------------------------------------
+  # 4. apply: applies the exact plan file from the plan job. LOCKED.
+  # ---------------------------------------------------------------------------
+  apply:
+    name: 4. Apply
+    needs: [init, validate, plan]
+    # LOCKED: the leading `false &&` keeps this job permanently skipped. Remove it
+    # only in a reviewed change, after the blockers in docs/implementation-notes.md
+    # are resolved (separate read-only plan credentials, protected `main` and a
+    # `production` environment with required reviewers, verified on GitHub).
+    # The remaining conditions still apply once unlocked: manual run, explicit
+    # apply=true, and the main branch.
+    if: >-
+      false &&
+      github.event_name == 'workflow_dispatch' &&
+      inputs.apply == true &&
+      github.ref == 'refs/heads/main'
+    # Uses the existing `production` environment. Whether it has required
+    # reviewers cannot be verified locally; the first step below checks it at run
+    # time and stops if it does not.
+    environment: production
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      actions: read # lets the token read the environment's protection rules
+    steps:
+      # Fail closed, before AWS credentials are used: if the production
+      # environment has no required-reviewers rule (or it cannot be read), stop.
+      - name: Verify production environment requires reviewers
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! reviewers=$(gh api "repos/${GITHUB_REPOSITORY}/environments/production" \
+              --jq '[.protection_rules[]? | select(.type == "required_reviewers")] | length'); then
+            echo "::error::Could not read the 'production' environment. Apply is blocked (fail closed)."
+            exit 1
+          fi
+          if [ "${reviewers:-0}" -lt 1 ]; then
+            echo "::error::The 'production' environment has no required reviewers. Configure them, then re-run."
+            exit 1
+          fi
+          echo "production environment has required reviewers configured."
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Terraform and initialize backend
+        uses: ./.github/actions/terraform-env
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.AWS_REGION }}
+          state-bucket: ${{ vars.TF_STATE_BUCKET }}
+          state-key: ${{ env.TF_STATE_KEY }}
+          terraform-version: ${{ env.TF_VERSION }}
+
+      - name: Download encrypted plan
+        uses: actions/download-artifact@v4
+        with:
+          name: tfplan-dev-${{ github.run_id }}-${{ github.run_attempt }}
+          path: envs/dev
+
+      - name: Decrypt plan and verify fingerprint
+        working-directory: envs/dev
+        env:
+          PLAN_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}:${{ github.run_id }}:${{ github.run_attempt }}
+          EXPECTED_SHA256: ${{ needs.plan.outputs.plan_sha256 }}
+        run: |
+          openssl enc -d -aes-256-cbc -pbkdf2 -iter 600000 -in tfplan.enc -out tfplan -pass env:PLAN_KEY
+          rm -f tfplan.enc
+          if [ -z "$EXPECTED_SHA256" ] || ! echo "${EXPECTED_SHA256}  tfplan" | sha256sum -c - >/dev/null 2>&1; then
+            rm -f tfplan
+            echo "::error::Decrypted plan does not match the fingerprint produced by the plan job. Not applying."
+            exit 1
+          fi
+          echo "Plan fingerprint verified."
+
+      # Applies the saved plan only. Terraform refuses a plan that is stale
+      # relative to the current state. Output goes to a file; the log shows
+      # progress lines and errors, not attribute values.
+      - name: Terraform apply (saved plan)
+        working-directory: envs/dev
+        run: |
+          set +e
+          terraform apply -input=false -lock-timeout=60s -no-color -auto-approve tfplan > apply.log 2>&1
+          status=$?
+          grep -E '^(module\.|Apply complete|Error)' apply.log || true
+          if [ "$status" -ne 0 ]; then
+            echo "::error::terraform apply failed. Error lines:"
+            grep -A8 'Error' apply.log || true
+          fi
+          rm -f apply.log
+          exit "$status"
+
+      - name: Remove plan files from runner
+        if: always()
+        working-directory: envs/dev
+        run: rm -f tfplan tfplan.enc apply.log

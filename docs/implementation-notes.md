@@ -59,6 +59,37 @@ dependencies: `network` -> `security` -> `database`; `storage` and `database` ->
 - S3 versioning: noncurrent versions accrue storage until a lifecycle rule exists.
 - Coming later: ALB hourly and LCU charges, EC2 instances, CloudWatch, optional WAF.
 
+## GitHub Actions
+- `.github/workflows/terraform.yml` is the only workflow (it replaced the separate CI and deploy
+  workflows). It has four sequential jobs: `init` -> `validate` -> `plan` -> `apply`.
+  - Pull requests and pushes to `main` / `refactor/modules` run `validate` only (`init`, `plan`
+    and `apply` are skipped), so no AWS credentials are used on those events. The push and pull
+    request runs of the same branch share a concurrency group, so the older one is cancelled.
+  - Manual runs (`workflow_dispatch`) run `init` -> `validate` -> `plan`. Backend values come
+    from the `TF_STATE_BUCKET` and `AWS_REGION` variables and the key `dev/terraform.tfstate`.
+- The plan is never printed. The job summary lists creates, updates, destroys, replaces and
+  moves by address. A destroy or replace fails the run unless `allow_destroy` is set. The plan
+  is fingerprinted (SHA-256, shown in the summary and re-checked by apply). Only when
+  `apply=true` it is also encrypted with a key derived from the existing
+  `AWS_SECRET_ACCESS_KEY` plus the run id and attempt (no extra secret) and stored as a 1-day
+  artifact named per run attempt. It is never uploaded in plaintext.
+- **Apply is locked in code** (`false &&` in the apply job's `if`). Unlocked, it would also
+  require a manual run, `apply=true`, branch `main`, a matching `expected_state_resources`, and
+  approval for the existing `production` environment. Unlock only in a reviewed change after
+  the blockers below are resolved. The earlier optional `TF_APPLY_ENABLED` variable was dropped
+  in favor of this stricter code lock.
+- Init and plan only run for the repository owner on `main` or `refactor/modules`. Missing or
+  malformed settings fail the `init` job before any AWS call (names only, never values), an
+  unreadable remote state fails closed instead of reporting 0 resources, and a missing or empty
+  state fails the plan unless `allow_initial_create` is set.
+- Required existing GitHub setup: secrets `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`;
+  variables `TF_STATE_BUCKET`, `AWS_REGION`. No other secret or variable is used.
+- Open security blockers for enabling apply: the same AWS keys are used by plan and apply (no
+  read-only identity, no environment-scoped keys); `main` branch protection and the
+  `production` environment (reviewers, prevent self-review) are unverified; the Linux
+  provider lock hashes are unverified; the reviewer-check API call is untested.
+- Not yet run on GitHub; the workflows were checked locally only (shell syntax, structure).
+
 ## Operating notes
 - Before `envs/dev` can use the remote backend, `bootstrap/` must be applied and
   `backend.hcl` created from `backend.hcl.example`.

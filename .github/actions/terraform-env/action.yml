@@ -1,0 +1,57 @@
+name: Terraform environment
+description: >
+  Configure AWS credentials, install Terraform and initialize envs/dev against
+  the S3 backend. Shared by the init, plan and apply jobs so all three use the
+  same version, backend settings and provider versions (from the lock file).
+
+inputs:
+  aws-access-key-id:
+    description: AWS access key ID (pass from a secret).
+    required: true
+  aws-secret-access-key:
+    description: AWS secret access key (pass from a secret).
+    required: true
+  aws-region:
+    description: AWS region; must be the region of the state bucket.
+    required: true
+  state-bucket:
+    description: Name of the S3 bucket that holds the Terraform state.
+    required: true
+  state-key:
+    description: Object key of the state file in the bucket.
+    required: true
+  terraform-version:
+    description: Terraform CLI version to install.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    # Credentials are masked in logs by the action and are never echoed.
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ inputs.aws-access-key-id }}
+        aws-secret-access-key: ${{ inputs.aws-secret-access-key }}
+        aws-region: ${{ inputs.aws-region }}
+
+    - name: Set up Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: ${{ inputs.terraform-version }}
+        terraform_wrapper: false
+
+    - name: Terraform init (S3 backend)
+      shell: bash
+      working-directory: envs/dev
+      env:
+        STATE_BUCKET: ${{ inputs.state-bucket }}
+        STATE_KEY: ${{ inputs.state-key }}
+        STATE_REGION: ${{ inputs.aws-region }}
+      run: |
+        terraform init -input=false \
+          -backend-config="bucket=${STATE_BUCKET}" \
+          -backend-config="key=${STATE_KEY}" \
+          -backend-config="region=${STATE_REGION}" \
+          -backend-config="encrypt=true" \
+          -backend-config="use_lockfile=true"

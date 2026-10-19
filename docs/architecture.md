@@ -1,6 +1,8 @@
 # Architecture
 
-Source of truth is the Terraform in `bootstrap/` and `envs/dev/`. Labels used below:
+![Architecture diagram](architecture.png)
+
+Source of truth is the Terraform in `bootstrap/`, `modules/` and `envs/dev/`. Labels used below:
 
 - **Configured**: present in the code and accepted by `terraform fmt` / `terraform validate`.
 - **Assumed**: reasoned from the code or AWS behavior; not observed in a plan or a deployment.
