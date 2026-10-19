@@ -91,7 +91,13 @@ jobs:
           missing=0
           for n in HAS_KEY_ID HAS_SECRET HAS_BUCKET HAS_REGION; do
             if [ "${!n}" != "true" ]; then
-              echo "::error::Missing GitHub configuration: ${n#HAS_}"
+              case "$n" in
+                HAS_KEY_ID)  kind="secret";   name="AWS_ACCESS_KEY_ID";      tab="Secrets" ;;
+                HAS_SECRET)  kind="secret";   name="AWS_SECRET_ACCESS_KEY";  tab="Secrets" ;;
+                HAS_BUCKET)  kind="variable"; name="TF_STATE_BUCKET";        tab="Variables" ;;
+                HAS_REGION)  kind="variable"; name="AWS_REGION";             tab="Variables" ;;
+              esac
+              echo "::error::Missing repository $kind $name. Add it under Settings > Secrets and variables > Actions > $tab tab. Environment-level values, and a secret where a variable is expected (or the reverse), are not read."
               missing=1
             fi
           done
