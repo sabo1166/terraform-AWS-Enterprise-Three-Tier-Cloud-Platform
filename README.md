@@ -161,6 +161,8 @@ One workflow, `.github/workflows/terraform.yml`, with four sequential jobs: `ini
 | Manual run (`workflow_dispatch`) | `init`, `validate`, `plan` | `init` verifies the remote state is readable, `plan` reports creates, updates, destroys, replaces and moves, and fails safely on missing, empty or unexpected state. |
 | Manual run with `apply=true` | `apply` (locked) | **The apply job is locked in code and does not run.** When unlocked it would apply the exact fingerprinted plan from an encrypted artifact, from `main` only, after `production` environment approval. |
 
+A green run on a pull request or push only means `validate` passed. `init`, `plan` and `apply` show as skipped on those events, which is intentional. A manual run that a guard rejects (not `main` or `refactor/modules`, or not started by the repository owner) fails with an explanation instead of finishing green. Manual runs need the workflow file on the repository's default branch.
+
 Local checks performed on this code: `terraform fmt -check -recursive` and `terraform validate` in both roots, with `init -backend=false`. The workflow has not run on GitHub yet. Its open security blockers are documented in [docs/implementation-notes.md](docs/implementation-notes.md).
 
 ## Cost considerations
