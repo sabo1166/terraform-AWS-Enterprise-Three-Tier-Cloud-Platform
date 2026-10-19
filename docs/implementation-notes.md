@@ -67,6 +67,16 @@ dependencies: `network` -> `security` -> `database`; `storage` and `database` ->
     request runs of the same branch share a concurrency group, so the older one is cancelled.
   - Manual runs (`workflow_dispatch`) run `init` -> `validate` -> `plan`. Backend values come
     from the `TF_STATE_BUCKET` and `AWS_REGION` variables and the key `dev/terraform.tfstate`.
+- **Skipped jobs are normal on pull requests and pushes.** GitHub reports a run as successful
+  when jobs are skipped, so a green push run only means `validate` passed. The validate job
+  writes a summary saying so. On a manual run, a skipped `init` means a guard rejected the run
+  (not `main` / `refactor/modules`, or not started by the repository owner), and the run fails
+  with an explanation instead of finishing green. `plan` runs only after `init` and `validate`
+  succeeded.
+- To run init and plan: in the GitHub Actions tab choose the **Terraform** workflow, click
+  **Run workflow**, pick branch `main` or `refactor/modules`, leave `apply` unchecked, and
+  set `allow_initial_create` only if the remote state is expected to be empty. The Run workflow
+  button needs the workflow file on the repository's default branch.
 - The plan is never printed. The job summary lists creates, updates, destroys, replaces and
   moves by address. A destroy or replace fails the run unless `allow_destroy` is set. The plan
   is fingerprinted (SHA-256, shown in the summary and re-checked by apply). Only when
