@@ -4,27 +4,27 @@
 # so the groups can reference each other without a dependency cycle.
 
 resource "aws_security_group" "alb" {
-  name        = "${local.name_prefix}-alb-sg"
+  name        = "${var.name_prefix}-alb-sg"
   description = "Application Load Balancer: public HTTP entry point"
-  vpc_id      = aws_vpc.main.id
+  vpc_id      = var.vpc_id
 
-  tags = { Name = "${local.name_prefix}-alb-sg" }
+  tags = { Name = "${var.name_prefix}-alb-sg" }
 }
 
 resource "aws_security_group" "app" {
-  name        = "${local.name_prefix}-app-sg"
+  name        = "${var.name_prefix}-app-sg"
   description = "Application tier (EC2 Auto Scaling instances)"
-  vpc_id      = aws_vpc.main.id
+  vpc_id      = var.vpc_id
 
-  tags = { Name = "${local.name_prefix}-app-sg" }
+  tags = { Name = "${var.name_prefix}-app-sg" }
 }
 
 resource "aws_security_group" "db" {
-  name        = "${local.name_prefix}-db-sg"
+  name        = "${var.name_prefix}-db-sg"
   description = "Database tier (RDS MySQL)"
-  vpc_id      = aws_vpc.main.id
+  vpc_id      = var.vpc_id
 
-  tags = { Name = "${local.name_prefix}-db-sg" }
+  tags = { Name = "${var.name_prefix}-db-sg" }
 }
 
 # --- ALB ---------------------------------------------------------------------

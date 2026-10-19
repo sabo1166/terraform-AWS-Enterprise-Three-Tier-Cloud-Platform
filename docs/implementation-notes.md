@@ -18,15 +18,32 @@ run; no AWS resource exists as a result of this repository.**
 
 ```
 bootstrap/        state bucket (own local state, applied once)
-envs/dev/         dev environment
-  versions.tf  providers.tf  variables.tf  locals.tf  outputs.tf
-  network.tf  security_groups.tf  storage.tf  iam.tf  database.tf
+modules/          network, security, storage, iam, database
+                  (each: main.tf variables.tf outputs.tf versions.tf)
+envs/dev/         dev environment: module calls (main.tf) and environment values
+  main.tf  moved.tf  variables.tf  locals.tf  outputs.tf  versions.tf  providers.tf
   backend.hcl.example  terraform.tfvars.example
 docs/             this documentation
 ```
 
-Files are grouped by concern and kept flat. There is no `modules/` directory: with a single
-environment a module would add indirection without reuse. Revisit when `envs/prod` is added.
+## Module refactor (branch `refactor/modules`)
+Resources written in phases 2-4 were moved from the `envs/dev` root into five modules. Module
+dependencies: `network` -> `security` -> `database`; `storage` and `database` -> `iam`.
+
+- **Behavior:** names, arguments and tags are unchanged; each module receives
+  `name_prefix` and builds the same names as before. Verified offline by comparing the
+  resource blocks before and after (40 resources in both, no duplicates; the only changed
+  lines are `local.`/resource references replaced by module variables).
+- **State addresses:** every resource address changes (e.g. `aws_vpc.main` ->
+  `module.network.aws_vpc.main`). `envs/dev/moved.tf` has one `moved` block per resource,
+  including every `for_each` instance. They are not proof that existing infrastructure is safe.
+  If state exists, the first plan must be reviewed to show only moves and no create, change
+  or destroy for these resources (not yet run). If nothing was ever applied, the blocks are
+  ignored. Remove `moved.tf` after one successful apply.
+- **Validation:** kept at the root variables and repeated inside the modules that consume
+  them.
+- The `iam` module takes the bucket ARN and the DB secret ARN as inputs, so it is created
+  after `storage` and `database`.
 
 ## Conventions
 - Names: `${project}-${environment}-<component>` via `local.name_prefix`.

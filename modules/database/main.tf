@@ -1,5 +1,5 @@
 locals {
-  db_identifier = "${local.name_prefix}-mysql"
+  db_identifier = "${var.name_prefix}-mysql"
 
   # Parameter group family follows the engine version: "8.0.40" -> "mysql8.0".
   db_family = "mysql${join(".", slice(split(".", var.db_engine_version), 0, 2))}"
@@ -10,7 +10,7 @@ locals {
 resource "aws_db_subnet_group" "main" {
   name        = "${local.db_identifier}-subnets"
   description = "Private database subnets for ${local.db_identifier}"
-  subnet_ids  = [for s in aws_subnet.db : s.id]
+  subnet_ids  = var.subnet_ids
 
   tags = { Name = "${local.db_identifier}-subnets" }
 }
@@ -70,7 +70,7 @@ resource "aws_db_instance" "main" {
   # Private placement: db subnets only, no public address, reachable solely
   # from the app tier via the db security group.
   db_subnet_group_name   = aws_db_subnet_group.main.name
-  vpc_security_group_ids = [aws_security_group.db.id]
+  vpc_security_group_ids = [var.security_group_id]
   publicly_accessible    = false
   port                   = var.db_port
 

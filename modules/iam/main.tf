@@ -1,6 +1,6 @@
 # IAM for the application EC2 instances (used by the Auto Scaling launch
 # template in a later phase). No AdministratorAccess and no broad managed
-# policies: permissions are two small inline policies below.
+# policies: permissions are three small inline policies below.
 
 data "aws_iam_policy_document" "ec2_assume_role" {
   statement {
@@ -16,18 +16,18 @@ data "aws_iam_policy_document" "ec2_assume_role" {
 }
 
 resource "aws_iam_role" "app" {
-  name               = "${local.name_prefix}-app-ec2-role"
+  name               = "${var.name_prefix}-app-ec2-role"
   description        = "Application EC2 instances: SSM Session Manager and access to the app bucket"
   assume_role_policy = data.aws_iam_policy_document.ec2_assume_role.json
 
-  tags = { Name = "${local.name_prefix}-app-ec2-role" }
+  tags = { Name = "${var.name_prefix}-app-ec2-role" }
 }
 
 resource "aws_iam_instance_profile" "app" {
-  name = "${local.name_prefix}-app-ec2-profile"
+  name = "${var.name_prefix}-app-ec2-profile"
   role = aws_iam_role.app.name
 
-  tags = { Name = "${local.name_prefix}-app-ec2-profile" }
+  tags = { Name = "${var.name_prefix}-app-ec2-profile" }
 }
 
 # --- SSM Session Manager (shell access with no SSH/keys/open ports) -----------
@@ -65,14 +65,14 @@ data "aws_iam_policy_document" "app_bucket_access" {
     sid       = "ListAppBucket"
     effect    = "Allow"
     actions   = ["s3:ListBucket"]
-    resources = [aws_s3_bucket.app.arn]
+    resources = [var.app_bucket_arn]
   }
 
   statement {
     sid       = "ReadWriteAppObjects"
     effect    = "Allow"
     actions   = ["s3:GetObject", "s3:PutObject"]
-    resources = ["${aws_s3_bucket.app.arn}/*"]
+    resources = ["${var.app_bucket_arn}/*"]
   }
 }
 
@@ -95,7 +95,7 @@ data "aws_iam_policy_document" "db_secret_read" {
       "secretsmanager:GetSecretValue",
       "secretsmanager:DescribeSecret",
     ]
-    resources = [aws_db_instance.main.master_user_secret[0].secret_arn]
+    resources = [var.db_secret_arn]
   }
 }
 

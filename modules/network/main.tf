@@ -1,3 +1,38 @@
+data "aws_availability_zones" "available" {
+  state = "available"
+
+  # Skip Local Zones / Wavelength Zones; subnets here are regular-AZ only.
+  filter {
+    name   = "opt-in-status"
+    values = ["opt-in-not-required"]
+  }
+}
+
+locals {
+  # Exactly two AZs, per the architecture. Keys (az1, az2) are stable even if
+  # AWS reorders AZ names, so for_each addresses never shift.
+  azs = slice(data.aws_availability_zones.available.names, 0, 2)
+  az_map = {
+    for i, az in local.azs : "az${i + 1}" => {
+      name  = az
+      index = i
+    }
+  }
+
+  # Subnet CIDRs are carved from the VPC CIDR (+8 bits) with fixed index bands
+  # per tier, so tiers never overlap and there is room to grow inside each band.
+  #   public: 0-1   app: 10-11   db: 20-21
+  subnet_newbits = 8
+  public_cidrs   = { for k, v in local.az_map : k => cidrsubnet(var.vpc_cidr, local.subnet_newbits, v.index) }
+  app_cidrs      = { for k, v in local.az_map : k => cidrsubnet(var.vpc_cidr, local.subnet_newbits, 10 + v.index) }
+  db_cidrs       = { for k, v in local.az_map : k => cidrsubnet(var.vpc_cidr, local.subnet_newbits, 20 + v.index) }
+
+  # single  -> one NAT in the first AZ shared by every app subnet (cheaper,
+  #            but an outage of that AZ removes outbound access for both AZs).
+  # per_az  -> one NAT per AZ, each app subnet uses the NAT in its own AZ.
+  nat_azs = var.nat_mode == "single" ? { az1 = local.az_map["az1"] } : local.az_map
+}
+
 # ---------------------------------------------------------------------------
 # VPC
 # ---------------------------------------------------------------------------
@@ -6,7 +41,7 @@ resource "aws_vpc" "main" {
   enable_dns_support   = true
   enable_dns_hostnames = true # needed by RDS endpoints and SSM later
 
-  tags = { Name = "${local.name_prefix}-vpc" }
+  tags = { Name = "${var.name_prefix}-vpc" }
 }
 
 # Take over the default security group and give it no rules, so nothing can
@@ -14,7 +49,7 @@ resource "aws_vpc" "main" {
 resource "aws_default_security_group" "default" {
   vpc_id = aws_vpc.main.id
 
-  tags = { Name = "${local.name_prefix}-default-locked" }
+  tags = { Name = "${var.name_prefix}-default-locked" }
 }
 
 # ---------------------------------------------------------------------------
@@ -32,7 +67,7 @@ resource "aws_subnet" "public" {
   map_public_ip_on_launch = false
 
   tags = {
-    Name = "${local.name_prefix}-public-${each.key}"
+    Name = "${var.name_prefix}-public-${each.key}"
     Tier = "public"
   }
 }
@@ -45,7 +80,7 @@ resource "aws_subnet" "app" {
   cidr_block        = local.app_cidrs[each.key]
 
   tags = {
-    Name = "${local.name_prefix}-app-${each.key}"
+    Name = "${var.name_prefix}-app-${each.key}"
     Tier = "app"
   }
 }
@@ -58,7 +93,7 @@ resource "aws_subnet" "db" {
   cidr_block        = local.db_cidrs[each.key]
 
   tags = {
-    Name = "${local.name_prefix}-db-${each.key}"
+    Name = "${var.name_prefix}-db-${each.key}"
     Tier = "db"
   }
 }
@@ -69,14 +104,14 @@ resource "aws_subnet" "db" {
 resource "aws_internet_gateway" "main" {
   vpc_id = aws_vpc.main.id
 
-  tags = { Name = "${local.name_prefix}-igw" }
+  tags = { Name = "${var.name_prefix}-igw" }
 }
 
 # One shared public route table: both public subnets route identically.
 resource "aws_route_table" "public" {
   vpc_id = aws_vpc.main.id
 
-  tags = { Name = "${local.name_prefix}-public-rt" }
+  tags = { Name = "${var.name_prefix}-public-rt" }
 }
 
 resource "aws_route" "public_internet" {
@@ -94,14 +129,14 @@ resource "aws_route_table_association" "public" {
 
 # ---------------------------------------------------------------------------
 # NAT Gateway(s): outbound-only internet for the app tier. Strategy is set by
-# var.nat_mode (see locals.tf). Billable: hourly charge + per-GB processing.
+# var.nat_mode (see locals above). Billable: hourly charge + per-GB processing.
 # ---------------------------------------------------------------------------
 resource "aws_eip" "nat" {
   for_each = local.nat_azs
 
   domain = "vpc"
 
-  tags = { Name = "${local.name_prefix}-nat-eip-${each.key}" }
+  tags = { Name = "${var.name_prefix}-nat-eip-${each.key}" }
 
   depends_on = [aws_internet_gateway.main]
 }
@@ -112,7 +147,7 @@ resource "aws_nat_gateway" "main" {
   allocation_id = aws_eip.nat[each.key].id
   subnet_id     = aws_subnet.public[each.key].id
 
-  tags = { Name = "${local.name_prefix}-nat-${each.key}" }
+  tags = { Name = "${var.name_prefix}-nat-${each.key}" }
 
   depends_on = [aws_internet_gateway.main]
 }
@@ -126,7 +161,7 @@ resource "aws_route_table" "app" {
 
   vpc_id = aws_vpc.main.id
 
-  tags = { Name = "${local.name_prefix}-app-rt-${each.key}" }
+  tags = { Name = "${var.name_prefix}-app-rt-${each.key}" }
 }
 
 resource "aws_route" "app_nat" {
@@ -151,7 +186,7 @@ resource "aws_route_table_association" "app" {
 resource "aws_route_table" "db" {
   vpc_id = aws_vpc.main.id
 
-  tags = { Name = "${local.name_prefix}-db-rt" }
+  tags = { Name = "${var.name_prefix}-db-rt" }
 }
 
 resource "aws_route_table_association" "db" {
@@ -173,5 +208,5 @@ resource "aws_vpc_endpoint" "s3" {
   vpc_endpoint_type = "Gateway"
   route_table_ids   = [for rt in aws_route_table.app : rt.id]
 
-  tags = { Name = "${local.name_prefix}-s3-endpoint" }
+  tags = { Name = "${var.name_prefix}-s3-endpoint" }
 }

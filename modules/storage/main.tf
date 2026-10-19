@@ -1,9 +1,11 @@
 data "aws_caller_identity" "current" {}
 
+data "aws_region" "current" {}
+
 locals {
   # Account ID and region make the globally unique bucket name collision-free
   # without a random suffix (and keep it stable across plans).
-  app_bucket_name = "${local.name_prefix}-app-${data.aws_caller_identity.current.account_id}-${data.aws_region.current.name}"
+  app_bucket_name = "${var.name_prefix}-app-${data.aws_caller_identity.current.account_id}-${data.aws_region.current.name}"
 }
 
 # Private application bucket (uploads, artifacts, static config).

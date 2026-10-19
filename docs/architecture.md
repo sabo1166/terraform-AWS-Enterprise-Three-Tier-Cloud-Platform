@@ -33,7 +33,9 @@ Internet
   block, completed at init time from the git-ignored `backend.hcl` (S3 native locking via
   `use_lockfile`; Terraform >= 1.10 is required).
 
-### Network (`envs/dev/network.tf`, `locals.tf`)
+Each tier below is a module under `modules/`, called from `envs/dev/main.tf`.
+
+### Network (`modules/network`)
 - VPC from `vpc_cidr` (default `10.0.0.0/16`, validated to /16-/18) with DNS support and
   hostnames enabled.
 - Exactly two Availability Zones (first two returned by AWS, regular zones only), keyed
@@ -57,12 +59,15 @@ Internet
 
 Switching modes later adds or removes NAT gateways and changes app routes; review the plan.
 
-### Storage (`storage.tf`)
+### Security groups (`modules/security`)
+Alb, app and db groups and their rules; see [security.md](security.md).
+
+### Storage (`modules/storage`)
 - Private app bucket `<project>-<env>-app-<account-id>-<region>`: public access blocked,
   ACLs disabled, versioning, SSE-S3, TLS-only (and TLS >= 1.2) bucket policy.
 - No lifecycle rules; noncurrent versions accumulate until one is added.
 
-### Database (`database.tf`)
+### Database (`modules/database`)
 - DB subnet group over both private db subnets; parameter group (utf8mb4,
   `require_secure_transport = 1`), family derived from `db_engine_version`.
 - MySQL instance: encrypted gp3 storage, not publicly accessible, db security group, master
@@ -70,7 +75,7 @@ Switching modes later adds or removes NAT gateways and changes app routes; revie
 - Defaults: `db.t4g.micro`, 20 GiB with autoscaling to 100, single-AZ, 7-day backups,
   deletion protection on, final snapshot on delete.
 
-### IAM (`iam.tf`)
+### IAM (`modules/iam`)
 EC2 role and instance profile; see [security.md](security.md) for the exact permissions.
 
 ## Not built yet
@@ -88,5 +93,6 @@ and SNS, CloudFront and WAF, HTTPS (needs a domain and ACM certificate), `envs/p
 - **Assumed** `db.t4g.micro` and MySQL `8.0` are offered in the chosen region.
 - **Assumed** the remote state bucket will be applied once before `envs/dev` is initialized.
 - Resource counts, prices and plan output have not been observed.
-- The empty-by-design `modules/` folder was removed; modules will be introduced when a second
-  environment justifies them.
+- The module refactor has been verified only offline (`fmt`, `validate`, block comparison).
+  If any resource already exists in state, the first plan after the refactor must be
+  reviewed for moves only; see `envs/dev/moved.tf` and `implementation-notes.md`.

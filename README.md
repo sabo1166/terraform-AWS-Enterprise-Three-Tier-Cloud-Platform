@@ -20,9 +20,10 @@ tier, and private RDS MySQL, across two Availability Zones. Built in reviewed ph
 
 ```
 bootstrap/    S3 bucket for remote state (own local state, applied once)
-envs/dev/     Dev environment
-  network.tf  security_groups.tf  storage.tf  iam.tf  database.tf
-  versions.tf  providers.tf  variables.tf  locals.tf  outputs.tf
+modules/      Reusable modules (each: main.tf variables.tf outputs.tf versions.tf)
+  network/  security/  storage/  iam/  database/
+envs/dev/     Dev environment: module calls and environment values
+  main.tf  moved.tf  variables.tf  locals.tf  outputs.tf  versions.tf  providers.tf
   backend.hcl.example  terraform.tfvars.example
 docs/         architecture.md  security.md  implementation-notes.md
 ```
