@@ -27,7 +27,7 @@ jobs:
     defaults:
       run:
         shell: bash
-        working-directory: TerraformAWS-Enterprise-Three-Tier-Cloud-Platform/environments/dev
+        working-directory: environments/dev
 
     steps:
       - name: Require explicit confirmation
@@ -86,7 +86,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: terraform-destroy-plan
-          path: TerraformAWS-Enterprise-Three-Tier-Cloud-Platform/environments/dev/tfplan
+          path: environments/dev/tfplan
           retention-days: 1
           if-no-files-found: error
 
@@ -99,7 +99,7 @@ jobs:
     defaults:
       run:
         shell: bash
-        working-directory: TerraformAWS-Enterprise-Three-Tier-Cloud-Platform/environments/dev
+        working-directory: environments/dev
 
     steps:
       - name: Checkout repository
@@ -122,7 +122,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: terraform-destroy-plan
-          path: TerraformAWS-Enterprise-Three-Tier-Cloud-Platform/environments/dev
+          path: environments/dev
 
       - name: Apply destruction plan
         run: |
