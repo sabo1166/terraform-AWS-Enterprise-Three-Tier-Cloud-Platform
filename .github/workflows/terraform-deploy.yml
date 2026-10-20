@@ -14,7 +14,7 @@ concurrency:
 env:
   TF_IN_AUTOMATION: "true"
   AWS_REGION: ${{ vars.AWS_REGION }}
-  TF_VAR_domain_name: "738928894854.realhandsonlabs.net"
+  TF_VAR_domain_name: "932431569521.realhandsonlabs.net"
   TF_VAR_allow_http_only: "false"
 
 jobs:
@@ -119,12 +119,12 @@ jobs:
       - name: Find public Route 53 hosted zone
         run: |
           ZONE_ID=$(aws route53 list-hosted-zones-by-name \
-            --dns-name realhandsonlabs.net \
-            --query "HostedZones[?Name=='realhandsonlabs.net.' && Config.PrivateZone==\`false\`].Id | [0]" \
+            --dns-name 932431569521.realhandsonlabs.net \
+            --query "HostedZones[?Name=='932431569521.realhandsonlabs.net.' && Config.PrivateZone==\`false\`].Id | [0]" \
             --output text)
 
           if [[ -z "$ZONE_ID" || "$ZONE_ID" == "None" ]]; then
-            echo "::error::Public hosted zone realhandsonlabs.net was not found."
+            echo "::error::Public hosted zone 932431569521.realhandsonlabs.net was not found."
             exit 1
           fi
 
@@ -160,3 +160,53 @@ jobs:
           path: environments/dev/tfplan
           retention-days: 1
           if-no-files-found: error
+
+  apply:
+    name: Terraform Apply
+    needs: plan
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        shell: bash
+        working-directory: environments/dev
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Download Terraform plan
+        uses: actions/download-artifact@v4
+        with:
+          name: terraform-plan
+          path: environments/dev
+
+      - name: Check saved plan
+        run: |
+          if [[ ! -s tfplan ]]; then
+            echo "::error::The saved plan environments/dev/tfplan is missing or empty."
+            exit 1
+          fi
+
+      - name: Initialize Terraform
+        run: terraform init -input=false
+
+      - name: Apply saved Terraform plan
+        env:
+          TF_VAR_db_password: ${{ secrets.TF_VAR_DB_PASSWORD }}
+        run: |
+          terraform apply \
+            -input=false \
+            -auto-approve \
+            -lock-timeout=60s \
+            tfplan
