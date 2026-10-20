@@ -13,6 +13,7 @@ concurrency:
 env:
   TF_IN_AUTOMATION: "true"
   AWS_REGION: ${{ vars.AWS_REGION }}
+  TF_VAR_allow_http_only: "true"
 
 jobs:
   init:
@@ -113,16 +114,19 @@ jobs:
       - name: Initialize Terraform
         run: terraform init -input=false
 
-      - name: Create Terraform plan
+      - name: Check required configuration
         env:
           TF_VAR_db_password: ${{ secrets.TF_VAR_DB_PASSWORD }}
-          TF_VAR_allow_http_only: "true"
         run: |
           if [[ -z "$TF_VAR_db_password" ]]; then
             echo "::error::Add the TF_VAR_DB_PASSWORD repository secret."
             exit 1
           fi
 
+      - name: Create Terraform plan
+        env:
+          TF_VAR_db_password: ${{ secrets.TF_VAR_DB_PASSWORD }}
+        run: |
           terraform plan \
             -input=false \
             -lock-timeout=60s \
@@ -176,3 +180,4 @@ jobs:
             -input=false \
             -lock-timeout=60s \
             tfplan
+
