@@ -1,0 +1,79 @@
+%% Architecture of environments/dev (source: Terraform code in this repository).
+%% Solid arrows = application request path. Dotted = optional or non-request flows.
+%% Explicit fills + dark text keep the diagram readable on GitHub light and dark themes.
+flowchart TB
+  user(["Internet clients"])
+
+  subgraph optional_edge["Optional: only when domain_name is set"]
+    r53["Route 53 alias record<br/>existing hosted zone"]
+    acm["ACM certificate<br/>DNS validated"]
+  end
+
+  subgraph mgmt["Infrastructure management - not in the request path"]
+    gha["GitHub Actions or<br/>PowerShell scripts"]
+    tf["Terraform"]
+    s3[("S3 remote state<br/>use_lockfile locking")]
+    gha --> tf
+    tf <--> s3
+  end
+
+  subgraph vpc["VPC 10.0.0.0/16 - region us-east-1 default"]
+    igw["Internet Gateway"]
+
+    subgraph azA["Availability Zone A"]
+      subgraph pubA["Public subnet 10.0.1.0/24"]
+        albA["ALB node"]
+        natA["NAT Gateway<br/>+ Elastic IP"]
+      end
+      subgraph appA["Private app subnet 10.0.11.0/24"]
+        ec2A["Nginx EC2<br/>Auto Scaling"]
+      end
+      subgraph dbA["Private DB subnet 10.0.21.0/24"]
+        rdsA[("RDS MySQL<br/>primary")]
+      end
+    end
+
+    subgraph azB["Availability Zone B"]
+      subgraph pubB["Public subnet 10.0.2.0/24"]
+        albB["ALB node"]
+        natB["NAT Gateway<br/>optional: nat_gateway_mode = per_az"]
+      end
+      subgraph appB["Private app subnet 10.0.12.0/24"]
+        ec2B["Nginx EC2<br/>Auto Scaling"]
+      end
+      subgraph dbB["Private DB subnet 10.0.22.0/24"]
+        rdsB[("RDS standby<br/>optional: db_multi_az = true")]
+      end
+    end
+  end
+
+  user -->|"DNS lookup"| r53
+  user -->|"HTTP 80"| igw
+  user -.->|"HTTPS 443 when configured"| igw
+  acm -.-> albA
+  igw --> albA
+  igw --> albB
+  albA -->|"SG: HTTP 80 from ALB SG"| ec2A
+  albB -->|"SG: HTTP 80 from ALB SG"| ec2B
+  ec2A -->|"SG: MySQL 3306 from app SG"| rdsA
+  ec2B -->|"SG: MySQL 3306 from app SG"| rdsA
+  rdsA -.->|"sync, if multi-AZ"| rdsB
+  ec2A -.->|"outbound 80/443 via NAT"| natA
+  ec2B -.->|"outbound 80/443 via NAT"| natA
+  ec2B -.->|"per_az mode"| natB
+  natA -.-> igw
+  natB -.-> igw
+  tf -.->|"manages"| vpc
+
+  classDef edge fill:#FF9900,stroke:#232F3E,color:#111
+  classDef pub fill:#7AA116,stroke:#232F3E,color:#111
+  classDef app fill:#ED7100,stroke:#232F3E,color:#111
+  classDef db fill:#3B48CC,stroke:#232F3E,color:#fff
+  classDef mgmt fill:#E7E9EC,stroke:#232F3E,color:#111
+  classDef opt stroke-dasharray:5 5
+  class igw,albA,albB,natA,natB pub
+  class ec2A,ec2B app
+  class rdsA,rdsB db
+  class r53,acm,user edge
+  class gha,tf,s3 mgmt
+  class natB,rdsB,r53,acm opt
