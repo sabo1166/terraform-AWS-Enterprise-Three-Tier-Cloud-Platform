@@ -116,6 +116,7 @@ jobs:
       - name: Create Terraform plan
         env:
           TF_VAR_db_password: ${{ secrets.TF_VAR_DB_PASSWORD }}
+          TF_VAR_allow_http_only: "true"
         run: |
           if [[ -z "$TF_VAR_db_password" ]]; then
             echo "::error::Add the TF_VAR_DB_PASSWORD repository secret."
